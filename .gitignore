@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+
+# dev/debug scripts from original exploration
+debug_jp.py
+tts.py
+voice_list.py
