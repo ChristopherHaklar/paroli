@@ -48,7 +48,7 @@ A key use case for this server is pairing it with the [Read Aloud: A Text to Spe
      ]
      ```
 
-The `mix` voice is the standout option here — it auto-detects Japanese script within English text and switches pipelines per segment, so you can read mixed-language pages without manually changing voices or limiting your selection to one language.
+The `mix` voice is the standout option here — it auto-detects Japanese script within English text and switches pipelines per segment, so you can read mixed-language pages without manually changing voices or limiting your selection to one language. For example, selecting a sentence like "今日 was a great day, but 明日 will be even better!" will read the Japanese words in Japanese and the English words in English, seamlessly.
 
 ## Running
 
