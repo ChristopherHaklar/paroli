@@ -1,16 +1,30 @@
 import re
-import io
+import struct
+import logging
+import time
+import warnings
+import itertools
 import numpy as np
-import soundfile as sf
-from fastapi import FastAPI, Request, HTTPException
+from pydantic import BaseModel, Field
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+import torch
 from kokoro import KPipeline
 
-# how aggressively to trim (absolute amplitude threshold)
+warnings.filterwarnings("ignore", category=UserWarning, module="torch")
+warnings.filterwarnings("ignore", category=FutureWarning, module="torch")
+logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("misaki").setLevel(logging.ERROR)
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger(__name__)
+_req_id = itertools.count(1)
+
+log.info("device=%s", "cuda" if torch.cuda.is_available() else "cpu")
+
 SILENCE_THRESH = 1e-4
-# how long to cross-fade in seconds
-CROSSFADE_SEC = 0.05
 SR = 24000
 
 app = FastAPI()
@@ -21,23 +35,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# voice→lang map
 voice2lang = {
-    "af_heart": "a",   # English
-    "jf_alpha": "j",   # Japanese
-    "mix":      "mix", # special auto switch
+    "af_heart": "a",
+    "jf_alpha": "j",
+    "mix":      "mix",
 }
 
-# one pipeline per real language
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
 pipelines = {
-    "a": KPipeline(lang_code="a"),
-    "j": KPipeline(lang_code="j"),
+    "a": KPipeline(lang_code="a", repo_id="hexgrad/Kokoro-82M", device=DEVICE),
+    "j": KPipeline(lang_code="j", repo_id="hexgrad/Kokoro-82M", device=DEVICE),
 }
 
 DEFAULT_VOICE = "af_heart"
 
-# regex to split Japanese vs non-Japanese runs
-_jp_re = re.compile(r"[\u3000-\u30FF\u4E00-\u9FFF]+")
+_jp_re = re.compile(r"[　-ヿ一-鿿]+")
 
 
 def segment_text(text):
@@ -74,6 +87,7 @@ async def voices():
 
 
 def trim_silence(wave, thresh=SILENCE_THRESH):
+    wave = np.asarray(wave)
     mask = np.abs(wave) > thresh
     idx = np.flatnonzero(mask)
     if idx.size == 0:
@@ -81,56 +95,69 @@ def trim_silence(wave, thresh=SILENCE_THRESH):
     return wave[idx[0]:idx[-1] + 1]
 
 
-def concat_with_crossfade(chunks, sr=SR, crossfade_sec=CROSSFADE_SEC):
-    fade_len = int(sr * crossfade_sec)
-    out = chunks[0]
-    for seg in chunks[1:]:
-        if fade_len > 0 and len(out) >= fade_len and len(seg) >= fade_len:
-            fade_out = np.linspace(1.0, 0.0, fade_len)
-            fade_in  = np.linspace(0.0, 1.0, fade_len)
-            tail   = out[-fade_len:] * fade_out
-            head   = seg[:fade_len]  * fade_in
-            middle = np.add(tail, head)
-            out = np.concatenate([out[:-fade_len], middle, seg[fade_len:]])
-        else:
-            out = np.concatenate([out, seg])
-    return out
+def _wav_header(sample_rate=SR, channels=1, bits=16) -> bytes:
+    # 0xFFFFFFFF signals unknown/streaming size to compliant WAV parsers
+    byte_rate = sample_rate * channels * bits // 8
+    block_align = channels * bits // 8
+    return struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF", 0xFFFFFFFF, b"WAVE",
+        b"fmt ", 16, 1, channels, sample_rate, byte_rate, block_align, bits,
+        b"data", 0xFFFFFFFF,
+    )
 
 
-async def do_tts(text, voice_id):
-    waves = []
+def _pcm16(chunk) -> bytes:
+    arr = np.asarray(chunk)
+    return (np.clip(arr, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
+
+
+async def stream_tts(text: str, voice_id: str, speed: float = 1.0):
+    yield _wav_header()
 
     if voice_id == "mix":
-        runs = segment_text(text)
-        for lang, seg in runs:
+        for lang, seg in segment_text(text):
             if not seg.strip():
                 continue
             vid = "jf_alpha" if lang == "j" else "af_heart"
-            for _, _, chunk in pipelines[lang](seg, voice=vid):
-                waves.append(chunk)
+            for _, _, chunk in pipelines[lang](seg, voice=vid, speed=speed):
+                trimmed = trim_silence(chunk)
+                if len(trimmed) > 0:
+                    yield _pcm16(trimmed)
     else:
         lang = voice2lang.get(voice_id, "a")
-        for _, _, chunk in pipelines[lang](text, voice=voice_id):
-            waves.append(chunk)
+        for _, _, chunk in pipelines[lang](text, voice=voice_id, speed=speed):
+            trimmed = trim_silence(chunk)
+            if len(trimmed) > 0:
+                yield _pcm16(trimmed)
 
-    # trim silence from each chunk and discard empties
-    trimmed = [w for w in (trim_silence(c) for c in waves) if len(w) > 0]
-    if not trimmed:
-        raise HTTPException(status_code=500, detail="No audio generated")
 
-    final = concat_with_crossfade(trimmed)
-
-    buf = io.BytesIO()
-    sf.write(buf, final, SR, format="WAV")
-    buf.seek(0)
-    return buf
+class TTSRequest(BaseModel):
+    input: str
+    voice: str = DEFAULT_VOICE
+    speed: float = Field(1.0, ge=0.25, le=4.0)
 
 
 @app.post("/v1/audio/speech")
 @app.post("/v1/audio/speech/create")
-async def tts_create(req: Request):
-    j     = await req.json()
-    text  = j.get("input", "")
-    voice = j.get("voice", DEFAULT_VOICE)
-    buf   = await do_tts(text, voice)
-    return StreamingResponse(buf, media_type="audio/wav")
+async def tts_create(req: TTSRequest):
+    if not req.input.strip():
+        raise HTTPException(status_code=400, detail="input must not be empty")
+    if req.voice not in voice2lang:
+        raise HTTPException(status_code=400, detail=f"unknown voice '{req.voice}'")
+
+    rid = next(_req_id)
+    log.info("[%d] start voice=%s speed=%s chars=%d", rid, req.voice, req.speed, len(req.input))
+    t0 = time.perf_counter()
+
+    async def timed_stream():
+        first = True
+        async for chunk in stream_tts(req.input, req.voice, req.speed):
+            if first:
+                log.info("[%d] ttfb=%.3fs", rid, time.perf_counter() - t0)
+                first = False
+            yield chunk
+        log.info("[%d] done total=%.3fs", rid, time.perf_counter() - t0)
+
+    headers = {"X-Accel-Buffering": "no"}
+    return StreamingResponse(timed_stream(), media_type="audio/wav", headers=headers)

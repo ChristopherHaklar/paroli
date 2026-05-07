@@ -2,13 +2,23 @@
 Quick functional test for the Paroli TTS server.
 Run with: pytest test_server.py -v
 """
-import io
-import wave
+import struct
 import pytest
 from fastapi.testclient import TestClient
 from server import app
 
 client = TestClient(app)
+
+
+def _check_wav(content: bytes):
+    """Validate streaming WAV structure by parsing header bytes directly."""
+    assert content[:4] == b"RIFF", "missing RIFF magic"
+    assert content[8:12] == b"WAVE", "missing WAVE marker"
+    assert content[12:16] == b"fmt ", "missing fmt chunk"
+    sample_rate = struct.unpack_from("<I", content, 24)[0]
+    assert sample_rate == 24000, f"unexpected sample rate {sample_rate}"
+    assert content[36:40] == b"data", "missing data chunk"
+    assert len(content) > 44, "no audio data after header"
 
 
 def test_health():
@@ -37,28 +47,19 @@ def test_tts_english():
     r = client.post("/v1/audio/speech", json={"input": "Hello.", "voice": "af_heart"})
     assert r.status_code == 200
     assert r.headers["content-type"] == "audio/wav"
-    buf = io.BytesIO(r.content)
-    with wave.open(buf) as w:
-        assert w.getframerate() == 24000
-        assert w.getnframes() > 0
+    _check_wav(r.content)
 
 
 def test_tts_japanese():
     r = client.post("/v1/audio/speech", json={"input": "こんにちは", "voice": "jf_alpha"})
     assert r.status_code == 200
-    buf = io.BytesIO(r.content)
-    with wave.open(buf) as w:
-        assert w.getframerate() == 24000
-        assert w.getnframes() > 0
+    _check_wav(r.content)
 
 
 def test_tts_mix():
     r = client.post("/v1/audio/speech", json={"input": "Hello こんにちは world", "voice": "mix"})
     assert r.status_code == 200
-    buf = io.BytesIO(r.content)
-    with wave.open(buf) as w:
-        assert w.getframerate() == 24000
-        assert w.getnframes() > 0
+    _check_wav(r.content)
 
 
 def test_tts_alias_endpoint():
