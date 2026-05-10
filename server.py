@@ -1,3 +1,4 @@
+import os
 import re
 import struct
 import logging
@@ -6,7 +7,7 @@ import warnings
 import itertools
 import numpy as np
 from pydantic import BaseModel, Field
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 import torch
@@ -21,6 +22,7 @@ logging.getLogger("misaki").setLevel(logging.ERROR)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 _req_id = itertools.count(1)
+VERBOSE = os.getenv("PAROLI_VERBOSE", "").lower() in ("1", "true", "yes")
 
 log.info("device=%s", "cuda" if torch.cuda.is_available() else "cpu")
 
@@ -28,6 +30,16 @@ SILENCE_THRESH = 1e-4
 SR = 24000
 
 app = FastAPI()
+
+
+@app.middleware("http")
+async def log_request_body(request: Request, call_next):
+    if VERBOSE and request.method == "POST":
+        body = await request.body()
+        log.info("POST %s body: %s", request.url.path, body.decode())
+    return await call_next(request)
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -135,7 +147,7 @@ async def stream_tts(text: str, voice_id: str, speed: float = 1.0):
 class TTSRequest(BaseModel):
     input: str
     voice: str = DEFAULT_VOICE
-    speed: float = Field(1.0, ge=0.25, le=4.0)
+    speed: float = Field(1.5, ge=0.25, le=4.0)
 
 
 @app.post("/v1/audio/speech")
