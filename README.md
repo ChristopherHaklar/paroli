@@ -53,7 +53,7 @@ A key use case for this server is pairing it with the [Read Aloud: A Text to Spe
 2. Go to the **Voice** tab and scroll to the bottom
 3. Click **"Enable Custom Voices..."**
 4. Under the **OpenAI** option, set:
-   - **API URL:** `http://localhost:8000/v1/audio/speech`
+   - **API URL:** `http://localhost:8000/v1`
    - **Voice List:**
      ```json
      [
