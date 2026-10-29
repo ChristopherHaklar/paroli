@@ -477,11 +477,13 @@ el.follow.addEventListener('click', () => {
 function openSettings() {
   el.server.value = settings.server;
   el.serverResult.textContent = '';
+  el.settings.returnValue = '';
   el.settings.showModal();
 }
 
 $('open-settings').addEventListener('click', openSettings);
 el.errorSettings.addEventListener('click', openSettings);
+$('close-settings').addEventListener('click', () => el.settings.close());
 $('test-server').addEventListener('click', async () => {
   const server = el.server.value.replace(/\/+$/, '');
   el.serverResult.textContent = 'Testing…';

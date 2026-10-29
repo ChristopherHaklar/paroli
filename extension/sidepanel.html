@@ -73,7 +73,12 @@
 
   <dialog id="settings">
     <form method="dialog">
-      <h2>Settings</h2>
+      <div class="dialog-head">
+        <h2>Settings</h2>
+        <button id="close-settings" type="button" class="icon" title="Close" aria-label="Close">
+          <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
+      </div>
       <label class="field">
         <span>Server URL</span>
         <input id="server" type="url" placeholder="http://localhost:8000/v1" required>
@@ -83,7 +88,16 @@
         <button id="test-server" type="button" class="secondary">Test connection</button>
         <button value="save">Save</button>
       </div>
-      <p class="muted small">Shortcuts: Space play/pause · ← → sentence · [ ] speed · Esc stop. Change the global shortcut at chrome://extensions/shortcuts.</p>
+
+      <h3>Keyboard shortcuts</h3>
+      <dl class="shortcuts">
+        <dt><kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd></dt><dd>Read selection (any page)</dd>
+        <dt><kbd>Space</kbd></dt><dd>Play / pause</dd>
+        <dt><kbd>←</kbd> <kbd>→</kbd></dt><dd>Previous / next sentence</dd>
+        <dt><kbd>[</kbd> <kbd>]</kbd></dt><dd>Slower / faster</dd>
+        <dt><kbd>Esc</kbd></dt><dd>Stop</dd>
+      </dl>
+      <p class="muted small">All except the first work while the panel is focused. Change the global shortcut at <code>chrome://extensions/shortcuts</code>.</p>
     </form>
   </dialog>
 </body>
