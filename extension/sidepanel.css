@@ -65,7 +65,7 @@ header .transport { grid-column: 2; }
 header .status { grid-column: 3; justify-self: end; }
 footer.bar { border-top: 1px solid var(--border); flex-wrap: wrap; }
 
-.transport { display: flex; gap: 4px; }
+.transport { display: flex; align-items: center; gap: 4px; }
 
 button {
   cursor: pointer;
