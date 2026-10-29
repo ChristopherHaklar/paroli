@@ -26,7 +26,7 @@ A lightweight TTS (text-to-speech) REST server built on [Kokoro](https://github.
 |-----------|------|---------|-------------|
 | `input` | string | — | Text to synthesize (required) |
 | `voice` | string | `af_heart` | Voice ID |
-| `speed` | float | `1.0` | Playback speed, `0.25`–`4.0` |
+| `speed` | float | `1.5` | Playback speed, `0.25`–`4.0` |
 
 Unknown fields (e.g. `model`) are silently ignored, so OpenAI-compatible TTS clients can point at this server without modification.
 
@@ -42,6 +42,21 @@ curl -X POST http://localhost:8000/v1/audio/speech \
   -d '{"input": "Hello world", "voice": "af_heart", "speed": 1.5}' \
   --output speech.wav
 ```
+
+## Browser integration — Paroli Reader extension
+
+`extension/` contains a Chrome extension built for this server. It splits text into sentences, requests one sentence at a time while prefetching the next few, and starts speaking as soon as the first sentence is ready instead of waiting for the whole selection.
+
+**Install:** open `chrome://extensions`, enable **Developer mode**, click **Load unpacked** and pick the `extension/` folder (Chrome 116+).
+
+**Use:** select text and press <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd>, or right-click → **Read with Paroli**. The side panel shows the text with the current sentence highlighted.
+
+- Click any sentence, or drag the progress bar, to jump there
+- Transport: play/pause, stop, previous/next sentence
+- Voice and speed changes apply from the next sentence
+- With the `mix` voice, a badge shows whether the current sentence is EN, JA or EN+JA
+- Panel shortcuts: <kbd>Space</kbd> play/pause, <kbd>←</kbd>/<kbd>→</kbd> sentence, <kbd>[</kbd>/<kbd>]</kbd> speed, <kbd>Esc</kbd> stop
+- Server URL is set in the panel's settings (default `http://localhost:8000/v1`); the global shortcut can be changed at `chrome://extensions/shortcuts`
 
 ## Browser integration — Read Aloud extension
 

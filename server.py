@@ -5,6 +5,7 @@ import logging
 import time
 import warnings
 import itertools
+import threading
 import numpy as np
 from pydantic import BaseModel, Field
 from fastapi import FastAPI, HTTPException, Request
@@ -61,6 +62,9 @@ pipelines = {
 }
 
 DEFAULT_VOICE = "af_heart"
+
+# Kokoro pipelines aren't safe to drive concurrently; serialize synthesis steps
+_synth_lock = threading.Lock()
 
 _jp_re = re.compile(r"[　-ヿ一-鿿]+")
 
@@ -124,7 +128,20 @@ def _pcm16(chunk) -> bytes:
     return (np.clip(arr, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
 
 
-async def stream_tts(text: str, voice_id: str, speed: float = 1.0):
+def _synth(lang, text, voice_id, speed):
+    gen = pipelines[lang](text, voice=voice_id, speed=speed)
+    while True:
+        with _synth_lock:
+            result = next(gen, None)
+        if result is None:
+            return
+        trimmed = trim_silence(result[2])
+        if len(trimmed) > 0:
+            yield _pcm16(trimmed)
+
+
+# Sync generator: StreamingResponse runs it in a threadpool, keeping the event loop free
+def stream_tts(text: str, voice_id: str, speed: float = 1.0):
     yield _wav_header()
 
     if voice_id == "mix":
@@ -132,16 +149,9 @@ async def stream_tts(text: str, voice_id: str, speed: float = 1.0):
             if not seg.strip():
                 continue
             vid = "jf_alpha" if lang == "j" else "af_heart"
-            for _, _, chunk in pipelines[lang](seg, voice=vid, speed=speed):
-                trimmed = trim_silence(chunk)
-                if len(trimmed) > 0:
-                    yield _pcm16(trimmed)
+            yield from _synth(lang, seg, vid, speed)
     else:
-        lang = voice2lang.get(voice_id, "a")
-        for _, _, chunk in pipelines[lang](text, voice=voice_id, speed=speed):
-            trimmed = trim_silence(chunk)
-            if len(trimmed) > 0:
-                yield _pcm16(trimmed)
+        yield from _synth(voice2lang.get(voice_id, "a"), text, voice_id, speed)
 
 
 class TTSRequest(BaseModel):
@@ -162,9 +172,9 @@ async def tts_create(req: TTSRequest):
     log.info("[%d] start voice=%s speed=%s chars=%d", rid, req.voice, req.speed, len(req.input))
     t0 = time.perf_counter()
 
-    async def timed_stream():
+    def timed_stream():
         first = True
-        async for chunk in stream_tts(req.input, req.voice, req.speed):
+        for chunk in stream_tts(req.input, req.voice, req.speed):
             if first:
                 log.info("[%d] ttfb=%.3fs", rid, time.perf_counter() - t0)
                 first = False
