@@ -1,4 +1,6 @@
-# paroli
+<p align="center"><img src="assets/logo.svg" alt="" width="112"></p>
+
+<h1 align="center">paroli</h1>
 
 A lightweight TTS (text-to-speech) REST server built on [Kokoro](https://github.com/hexgrad/kokoro), with support for English and Japanese voices and automatic language mixing.
 
