@@ -17,7 +17,7 @@ const EN_RE = /[A-Za-z]/;
 const $ = (id) => document.getElementById(id);
 const el = {
   play: $('play'), prev: $('prev'), next: $('next'), stop: $('stop'),
-  status: $('status'), lang: $('lang'), seek: $('seek'), count: $('count'), error: $('error'),
+  status: $('status'), lang: $('lang'), seek: $('seek'), count: $('count'), error: $('error'), errorText: $('error-text'), errorSettings: $('error-settings'),
   empty: $('empty'), doc: $('doc'), paste: $('paste'),
   voice: $('voice'), speed: $('speed'), speedValue: $('speed-value'), follow: $('follow'),
   settings: $('settings'), server: $('server'), serverResult: $('server-result'),
@@ -198,7 +198,8 @@ async function playIndex(i, delay = 0) {
   } catch (err) {
     if (token !== gen) return;
     stop();
-    showError(err.name === 'TypeError' ? `Can't reach the server at ${settings.server}` : err.message);
+    if (err.name === 'TypeError') unreachable();
+    else showError(err.message);
     return;
   }
   if (token !== gen) return;
@@ -350,9 +351,14 @@ function updateUI(status) {
   for (const b of [el.prev, el.next, el.stop]) b.disabled = !total;
 }
 
-function showError(message) {
-  el.error.textContent = message;
+function showError(message, { offerSettings = false } = {}) {
+  el.errorText.textContent = message;
+  el.errorSettings.hidden = !offerSettings;
   el.error.hidden = false;
+}
+
+function unreachable() {
+  showError(`Can't reach the server at ${settings.server}.`, { offerSettings: true });
 }
 
 function hideError() {
@@ -387,7 +393,7 @@ async function loadVoices() {
     hideError();
   } catch {
     voices = FALLBACK_VOICES;
-    showError(`Can't reach the server at ${settings.server}. Check it's running, or change the URL in settings.`);
+    unreachable();
   }
   el.voice.replaceChildren(...voices.map((v) => {
     const label = v.description ? `${v.voice} — ${v.description}` : `${v.voice} (${v.lang})`;
@@ -468,11 +474,14 @@ el.follow.addEventListener('click', () => {
   if (settings.follow) spans[current]?.scrollIntoView({ block: 'center', behavior: 'smooth' });
 });
 
-$('open-settings').addEventListener('click', () => {
+function openSettings() {
   el.server.value = settings.server;
   el.serverResult.textContent = '';
   el.settings.showModal();
-});
+}
+
+$('open-settings').addEventListener('click', openSettings);
+el.errorSettings.addEventListener('click', openSettings);
 $('test-server').addEventListener('click', async () => {
   const server = el.server.value.replace(/\/+$/, '');
   el.serverResult.textContent = 'Testing…';
