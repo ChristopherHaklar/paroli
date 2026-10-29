@@ -31,9 +31,9 @@ let playingIndex = -1;    // sentence whose audio is actually playing (vs. still
 let running = false;      // a playback chain is active (playing, loading or paused)
 let paused = false;
 let gen = 0;              // bumped on every jump/stop; stale async work checks it and bails
-let source = null;
-let ctx = null;
-const cache = new Map();  // index -> { promise, controller, done, failed }
+const player = new Audio();
+player.preservesPitch = true; // speed changes tempo only; Kokoro's own speed param clips vowels
+const cache = new Map();  // index -> { promise (resolves to a blob URL or null), controller, done, failed }
 
 // ---------- text splitting ----------
 
@@ -78,12 +78,8 @@ function splitText(text) {
 
 // ---------- audio fetching ----------
 
-function ensureCtx() {
-  ctx ??= new AudioContext();
-  return ctx;
-}
-
-function decodeWav(arrayBuffer) {
+// Repackages the server's streaming WAV (sizes marked unknown) as a complete file <audio> can seek
+function toWavUrl(arrayBuffer) {
   const view = new DataView(arrayBuffer);
   let sampleRate = 24000;
   let offset = 12;
@@ -95,24 +91,33 @@ function decodeWav(arrayBuffer) {
     if (id === 'data') { dataStart = offset + 8; break; }
     offset += 8 + size;
   }
-  const count = Math.floor((arrayBuffer.byteLength - dataStart) / 2);
-  if (count <= 0) return null;
-  const pcm = new Int16Array(arrayBuffer, dataStart, count);
-  const buffer = ensureCtx().createBuffer(1, count, sampleRate);
-  const channel = buffer.getChannelData(0);
-  for (let i = 0; i < count; i++) channel[i] = pcm[i] / 32768;
-  return buffer;
+  const bytes = Math.floor((arrayBuffer.byteLength - dataStart) / 2) * 2;
+  if (bytes <= 0) return null;
+  const header = new DataView(new ArrayBuffer(44));
+  const ascii = (at, str) => [...str].forEach((c, k) => header.setUint8(at + k, c.charCodeAt(0)));
+  ascii(0, 'RIFF'); header.setUint32(4, 36 + bytes, true); ascii(8, 'WAVE');
+  ascii(12, 'fmt '); header.setUint32(16, 16, true); header.setUint16(20, 1, true); header.setUint16(22, 1, true);
+  header.setUint32(24, sampleRate, true); header.setUint32(28, sampleRate * 2, true);
+  header.setUint16(32, 2, true); header.setUint16(34, 16, true);
+  ascii(36, 'data'); header.setUint32(40, bytes, true);
+  const blob = new Blob([header, new Uint8Array(arrayBuffer, dataStart, bytes)], { type: 'audio/wav' });
+  return URL.createObjectURL(blob);
 }
 
 async function fetchAudio(sentence, signal) {
   const res = await fetch(`${settings.server}/audio/speech`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ input: sentence.text, voice: settings.voice, speed: settings.speed }),
+    body: JSON.stringify({ input: sentence.text, voice: settings.voice, speed: 1 }),
     signal,
   });
   if (!res.ok) throw new Error(`Server returned ${res.status}: ${await res.text()}`);
-  return decodeWav(await res.arrayBuffer());
+  return toWavUrl(await res.arrayBuffer());
+}
+
+function dropEntry(entry) {
+  entry.controller.abort();
+  entry.promise.then((url) => url && URL.revokeObjectURL(url), () => {});
 }
 
 function startFetch(i) {
@@ -126,7 +131,7 @@ function startFetch(i) {
   return entry;
 }
 
-function getBuffer(i) {
+function getAudio(i) {
   let entry = cache.get(i);
   if (!entry || entry.failed) entry = startFetch(i);
   return entry.promise;
@@ -140,7 +145,7 @@ function pump() {
   const hi = Math.min(current + AHEAD, sentences.length - 1);
   for (const [i, entry] of cache) {
     if (i < lo || i > hi) {
-      entry.controller.abort();
+      dropEntry(entry);
       cache.delete(i);
     }
   }
@@ -155,21 +160,31 @@ function pump() {
 }
 
 function invalidateAudio() {
-  for (const entry of cache.values()) entry.controller.abort();
-  cache.clear();
-  // The current sentence keeps playing at the old settings; restart it only if it was still loading
+  for (const [i, entry] of cache) {
+    // Keep the sentence that's playing so it can finish; everything else refetches
+    if (i === playingIndex) continue;
+    dropEntry(entry);
+    cache.delete(i);
+  }
   if (running && playingIndex !== current) playIndex(current);
   else pump();
 }
 
 // ---------- playback ----------
 
-function stopSource() {
-  if (!source) return;
-  source.onended = null;
-  try { source.stop(); } catch {}
-  source.disconnect();
-  source = null;
+function stopAudio() {
+  player.onended = null;
+  player.pause();
+}
+
+function playCurrent() {
+  player.play().catch((err) => {
+    // Autoplay can be refused when no user gesture reached the panel; wait for the play button
+    if (err.name === 'NotAllowedError') {
+      paused = true;
+      updateUI();
+    }
+  });
 }
 
 function gapAfter(i) {
@@ -177,9 +192,11 @@ function gapAfter(i) {
   return sentences[i + 1].para !== sentences[i].para ? PARAGRAPH_GAP : SENTENCE_GAP;
 }
 
+const sleep = (seconds) => new Promise((resolve) => setTimeout(resolve, seconds * 1000));
+
 async function playIndex(i, delay = 0) {
   const token = ++gen;
-  stopSource();
+  stopAudio();
   playingIndex = -1;
   if (i >= sentences.length) {
     running = false;
@@ -192,9 +209,9 @@ async function playIndex(i, delay = 0) {
   setLoading(true);
   pump();
 
-  let buffer;
+  let url;
   try {
-    buffer = await getBuffer(i);
+    url = await getAudio(i);
   } catch (err) {
     if (token !== gen) return;
     stop();
@@ -204,31 +221,28 @@ async function playIndex(i, delay = 0) {
   }
   if (token !== gen) return;
   setLoading(false);
-  if (!buffer) {
+  if (!url) {
     playIndex(i + 1);
     return;
   }
 
-  const src = ctx.createBufferSource();
-  src.buffer = buffer;
-  src.connect(ctx.destination);
-  src.onended = () => {
+  player.src = url;
+  // Loading a new src resets playbackRate to defaultPlaybackRate
+  player.defaultPlaybackRate = player.playbackRate = settings.speed;
+  player.onended = () => {
     if (token === gen) playIndex(i + 1, gapAfter(i));
   };
-  source = src;
   playingIndex = i;
-  src.start(ctx.currentTime + delay);
   updateUI();
   pump();
+  if (delay) await sleep(delay / settings.speed);
+  if (token === gen && !paused) playCurrent();
 }
 
-async function start(i) {
+function start(i) {
   if (!sentences.length) return;
   hideError();
-  ensureCtx();
-  await ctx.resume();
-  // Autoplay can be refused when no user gesture reached the panel; wait for the play button
-  paused = ctx.state !== 'running';
+  paused = false;
   playIndex(i);
 }
 
@@ -239,21 +253,20 @@ function togglePlay() {
     start(current >= 0 && current < sentences.length ? current : 0);
   } else if (paused) {
     paused = false;
-    ctx.resume();
+    if (playingIndex === current) playCurrent();
     updateUI();
   } else {
     paused = true;
-    ctx.suspend();
+    player.pause();
     updateUI();
   }
 }
 
 function stop() {
   gen++;
-  stopSource();
+  stopAudio();
   running = false;
   playingIndex = -1;
-  if (paused && ctx) ctx.resume();
   paused = false;
   setLoading(false);
   pump();
@@ -263,10 +276,7 @@ function stop() {
 function jump(i) {
   if (!sentences.length) return;
   i = Math.max(0, Math.min(i, sentences.length - 1));
-  if (paused) {
-    paused = false;
-    ctx.resume();
-  }
+  paused = false;
   if (running) playIndex(i);
   else start(i);
 }
@@ -275,7 +285,7 @@ function jump(i) {
 
 function loadText(text, autoplay) {
   stop();
-  for (const entry of cache.values()) entry.controller.abort();
+  for (const entry of cache.values()) dropEntry(entry);
   cache.clear();
   sentences = splitText(text);
   current = sentences.length ? 0 : -1;
@@ -408,7 +418,7 @@ function changeSpeed(value) {
   el.speedValue.textContent = `${value.toFixed(1)}×`;
   if (value === settings.speed) return;
   saveSetting('speed', value);
-  invalidateAudio();
+  player.defaultPlaybackRate = player.playbackRate = value;
 }
 
 // ---------- input ----------
@@ -464,10 +474,7 @@ el.voice.addEventListener('change', () => {
   updateUI();
   invalidateAudio();
 });
-el.speed.addEventListener('input', () => {
-  el.speedValue.textContent = `${Number(el.speed.value).toFixed(1)}×`;
-});
-el.speed.addEventListener('change', () => changeSpeed(Number(el.speed.value)));
+el.speed.addEventListener('input', () => changeSpeed(Number(el.speed.value)));
 el.follow.addEventListener('click', () => {
   saveSetting('follow', !settings.follow);
   el.follow.setAttribute('aria-pressed', settings.follow);
